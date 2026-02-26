@@ -1,4 +1,7 @@
 import { useState, useEffect, useRef } from "react";
+import * as topojson from 'topojson-client';
+import osloBydeler from './osloBydeler.json';
+
 
 // ─── API CONFIG ───────────────────────────────────────────────────────────────
 // Replace these with your real backend endpoints when ready
@@ -69,7 +72,17 @@ function getRatingColor(r) {
 // Dynamically loads Leaflet from CDN so no npm install needed
 function useLeaflet(mapRef, setMap) {
   useEffect(() => {
-    if (window.L) { initMap(); return; }
+    if (window.L) {
+      const L = window.L;
+      delete L.Icon.Default.prototype._getIconUrl;
+      L.Icon.Default.mergeOptions({
+        iconRetinaUrl: 'https://cdnjs.cloudflare.com/ajax/libs/leaflet/1.9.4/images/marker-icon-2x.png',
+        iconUrl: 'https://cdnjs.cloudflare.com/ajax/libs/leaflet/1.9.4/images/marker-icon.png',
+        shadowUrl: 'https://cdnjs.cloudflare.com/ajax/libs/leaflet/1.9.4/images/marker-shadow.png',
+      });
+      initMap();
+      return;
+    }
 
     const link = document.createElement("link");
     link.rel = "stylesheet";
@@ -78,7 +91,19 @@ function useLeaflet(mapRef, setMap) {
 
     const script = document.createElement("script");
     script.src = "https://cdnjs.cloudflare.com/ajax/libs/leaflet/1.9.4/leaflet.min.js";
-    script.onload = initMap;
+    script.onload = () => {
+      const L = window.L;
+
+      // Fix default marker icon BEFORE initMap
+      delete L.Icon.Default.prototype._getIconUrl;
+      L.Icon.Default.mergeOptions({
+        iconRetinaUrl: 'https://cdnjs.cloudflare.com/ajax/libs/leaflet/1.9.4/images/marker-icon-2x.png',
+        iconUrl: 'https://cdnjs.cloudflare.com/ajax/libs/leaflet/1.9.4/images/marker-icon.png',
+        shadowUrl: 'https://cdnjs.cloudflare.com/ajax/libs/leaflet/1.9.4/images/marker-shadow.png',
+      });
+
+      initMap();
+    };
     document.head.appendChild(script);
 
     function initMap() {
@@ -101,6 +126,9 @@ export default function OsloEnergikart() {
   const [map, setMap] = useState(null);
   const markersRef = useRef([]);
 
+  const [districtGeoJson, setDistrictGeoJson] = useState(null);
+  const districtLayerRef = useRef(null);
+
   const [properties, setProperties] = useState([]);
   const [stats, setStats] = useState(MOCK_STATS);
   const [districts] = useState(MOCK_DISTRICTS);
@@ -115,11 +143,84 @@ export default function OsloEnergikart() {
 
   // Load data — swap mock for real fetch when backend is ready
   useEffect(() => {
-    // Real fetch would be:
-    // fetch(ENDPOINTS.properties).then(r => r.json()).then(setProperties);
-    // fetch(ENDPOINTS.stats).then(r => r.json()).then(setStats);
-    setProperties(MOCK_PROPERTIES);
-  }, []);
+
+    const geojson = topojson.feature(osloBydeler, Object.values(osloBydeler.objects)[0]);
+    setDistrictGeoJson(geojson);
+
+  // Real fetch would be:
+  // fetch(ENDPOINTS.properties).then(r => r.json()).then(setProperties);
+  // fetch(ENDPOINTS.stats).then(r => r.json()).then(setStats);
+  setProperties(MOCK_PROPERTIES);
+}, []);
+
+  // Draw district polygons whenever map, data or selection changes
+useEffect(() => {
+  if (!map || !window.L || !districtGeoJson) return;
+  const L = window.L;
+
+  // Remove old layer
+  if (districtLayerRef.current) {
+    map.removeLayer(districtLayerRef.current);
+  }
+
+  // Calculate average energy rating per district from properties
+  const districtRatings = {};
+  const ratingScore = { A: 1, B: 2, C: 3, D: 4, E: 5, F: 6, G: 7 };
+  const scoreToColor = score => {
+    if (score <= 1.5) return "#22c55e";
+    if (score <= 2.5) return "#4ade80";
+    if (score <= 3.5) return "#a3e635";
+    if (score <= 4.5) return "#facc15";
+    if (score <= 5.5) return "#fb923c";
+    return "#ef4444";
+  };
+
+  properties.forEach(p => {
+    if (!districtRatings[p.district]) districtRatings[p.district] = [];
+    districtRatings[p.district].push(ratingScore[p.rating] ?? 4);
+  });
+
+  try {
+    const layer = L.geoJSON(districtGeoJson, {
+      style: feature => {
+        // Match GeoJSON district name to your sidebar district name
+        const name = feature.properties?.BYDELSNAVN ?? "";
+        const scores = districtRatings[name];
+        const avgScore = scores ? scores.reduce((a, b) => a + b, 0) / scores.length : 4;
+        const isSelected = name === selectedDistrict;
+
+        return {
+          fillColor: scoreToColor(avgScore),
+          fillOpacity: isSelected ? 0.45 : 0.2,
+          color: isSelected ? "#1e40af" : "#64748b",
+          weight: isSelected ? 3 : 1,
+          dashArray: isSelected ? null : "4",
+        };
+      },
+      onEachFeature: (feature, layer) => {
+        const name = feature.properties?.BYDELSNAVN ?? "";
+
+        layer.on({
+          mouseover: e => {
+            e.target.setStyle({ weight: 2, fillOpacity: 0.35 });
+          },
+          mouseout: e => {
+            e.target.setStyle({
+              weight: name === selectedDistrict ? 3 : 1,
+              fillOpacity: name === selectedDistrict ? 0.45 : 0.2,
+            });
+          },
+          click: () => setSelectedDistrict(name),
+        });
+
+        layer.bindTooltip(name, { permanent: false, sticky: true, className: "district-tooltip" });
+      }
+    }).addTo(map);
+    districtLayerRef.current = layer;
+  } catch (e) {
+    console.warn("GeoJSON render failed:", e.message);
+  }
+}, [map, districtGeoJson, properties, selectedDistrict]);
 
   useLeaflet(mapRef, setMap);
 
@@ -146,6 +247,7 @@ export default function OsloEnergikart() {
     });
 
     filtered.forEach(p => {
+      if (!p.lat || !p.lng) return;
       const size = p.forSale ? 18 : 11;
       const color = getRatingColor(p.rating);
       const icon = L.divIcon({
@@ -159,7 +261,6 @@ export default function OsloEnergikart() {
         iconSize: [size, size],
         iconAnchor: [size / 2, size / 2],
       });
-
       const marker = L.marker([p.lat, p.lng], { icon })
         .addTo(map)
         .on("click", () => setSelectedProperty(p));
@@ -441,6 +542,19 @@ export default function OsloEnergikart() {
         ::-webkit-scrollbar { width: 4px; }
         ::-webkit-scrollbar-track { background: transparent; }
         ::-webkit-scrollbar-thumb { background: #e2e8f0; border-radius: 4px; }
+        .district-tooltip {
+          background: white;
+          border: 1px solid #e2e8f0;
+          border-radius: 6px;
+          padding: 4px 8px;
+          font-size: 12px;
+          font-weight: 600;
+          color: #0f172a;
+          box-shadow: 0 2px 8px rgba(0,0,0,0.12);
+        }
+        .leaflet-interactive:focus {
+          outline: none;
+        }
       `}</style>
     </div>
   );
