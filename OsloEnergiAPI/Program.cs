@@ -1,5 +1,7 @@
 using Microsoft.EntityFrameworkCore;
 using OsloEnergiAPI.Data;
+using OsloEnergiAPI.Services;
+
 
 var builder = WebApplication.CreateBuilder(args);
 
@@ -19,6 +21,9 @@ builder.Services.AddCors(options =>
               .AllowAnyHeader()
               .AllowAnyMethod());
 });
+
+builder.Services.AddHttpClient<EnergyDataService>();
+builder.Services.AddScoped<EnergyDataService>();
 
 var app = builder.Build();
 
