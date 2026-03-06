@@ -9,7 +9,7 @@ const API_BASE = "http://localhost:5000/api";
 const ENDPOINTS = {
   properties: `${API_BASE}/properties`,       // GET → list of properties with coords + energy rating
   districts: `${API_BASE}/districts`,         // GET → GeoJSON district boundaries
-  stats: `${API_BASE}/stats`,                 // GET → { total, forSale }
+  stats: `${API_BASE}/properties/stats`,                // GET → { total, forSale }
 };
 
 // ─── MOCK DATA (remove when backend is connected) ─────────────────────────────
@@ -141,16 +141,47 @@ export default function OsloEnergikart() {
   const [selectedProperty, setSelectedProperty] = useState(null);
   const [districtSearch, setDistrictSearch] = useState("");
 
+  useEffect(() => {
+    const geojson = topojson.feature(
+      osloBydeler,
+      Object.values(osloBydeler.objects)[0]
+    );
+    setDistrictGeoJson(geojson);
+  }, []);
+
   // Load data — swap mock for real fetch when backend is ready
   useEffect(() => {
+  fetch(ENDPOINTS.properties)
+    .then(r => r.json())
+    .then(data => {
+      const mapped = data.map(p => ({
+        ...p,
+        rating: p.energyRating,
+        byggeaar: p.buildYear,
+        energibehov: p.energyNeed,
+        storrelse: p.size,
+        kategori: p.category,
+        sqmPrice: p.sqmPrice,
+        pris: p.price,
+        bruksenhet: "000",
+        oppvarming: "Elektrisk",
+      }));
+      setProperties(mapped);
+    })
+    .catch(err => {
+      console.warn("Could not load properties, using mock data:", err);
+      setProperties(MOCK_PROPERTIES);
+    });
 
-    const geojson = topojson.feature(osloBydeler, Object.values(osloBydeler.objects)[0]);
-    setDistrictGeoJson(geojson);
-
-  // Real fetch would be:
-  // fetch(ENDPOINTS.properties).then(r => r.json()).then(setProperties);
-  // fetch(ENDPOINTS.stats).then(r => r.json()).then(setStats);
-  setProperties(MOCK_PROPERTIES);
+  fetch(ENDPOINTS.stats)
+    .then(r => r.json())
+    .then(data => {
+      setStats(data);
+    })
+    .catch(err => {
+      console.warn("Could not load stats, using mock data:", err);
+      setStats(MOCK_STATS);
+    });
 }, []);
 
   // Draw district polygons whenever map, data or selection changes
@@ -158,10 +189,14 @@ useEffect(() => {
   if (!map || !window.L || !districtGeoJson) return;
   const L = window.L;
 
-  // Remove old layer
   if (districtLayerRef.current) {
+  try {
     map.removeLayer(districtLayerRef.current);
+  } catch(e) {
+  
   }
+  districtLayerRef.current = null;
+}
 
   // Calculate average energy rating per district from properties
   const districtRatings = {};
@@ -181,6 +216,7 @@ useEffect(() => {
   });
 
   try {
+    if (!map._container) return;
     const layer = L.geoJSON(districtGeoJson, {
       style: feature => {
         // Match GeoJSON district name to your sidebar district name
@@ -247,7 +283,7 @@ useEffect(() => {
     });
 
     filtered.forEach(p => {
-      if (!p.lat || !p.lng) return;
+      if (!p.lat || !p.lng || !p.rating) return;
       const size = p.forSale ? 18 : 11;
       const color = getRatingColor(p.rating);
       const icon = L.divIcon({
